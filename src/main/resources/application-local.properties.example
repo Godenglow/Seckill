@@ -1,0 +1,42 @@
+# ============================================================================
+#  本机开发配置模板
+# ----------------------------------------------------------------------------
+#  用法：把本文件复制为 application-local.properties，再按自己机器的实际情况修改。
+#  application-local.properties 已被 .gitignore 忽略，凭据不会进入版本库。
+# ============================================================================
+
+server.port=8088
+
+# ---------------------------------------------------------------------------
+# MySQL
+# ---------------------------------------------------------------------------
+# 如果目标实例的账号使用 MySQL 8 默认的 caching_sha2_password 插件，
+# allowPublicKeyRetrieval=true 是必需的（非 SSL 连接下需索取 RSA 公钥）。
+spring.datasource.url=jdbc:mysql://localhost:3306/seckill?useUnicode=true&characterEncoding=utf-8&allowMultiQueries=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+spring.datasource.username=root
+spring.datasource.password=<你的数据库密码>
+
+# ---------------------------------------------------------------------------
+# Redis
+# ---------------------------------------------------------------------------
+redis.host=127.0.0.1
+redis.port=6379
+redis.password=<你的 Redis 密码，没有则留空>
+redis.timeout=10
+redis.poolMaxTotal=100
+redis.poolMaxIdle=50
+redis.poolMaxWait=3
+
+# ---------------------------------------------------------------------------
+# RabbitMQ
+# ---------------------------------------------------------------------------
+spring.rabbitmq.host=localhost
+spring.rabbitmq.port=5672
+spring.rabbitmq.username=guest
+spring.rabbitmq.password=guest
+spring.rabbitmq.virtual-host=/
+
+# ---------------------------------------------------------------------------
+# 秒杀数据重置接口开关（会删除全部订单并重置库存，仅本地开发打开）
+# ---------------------------------------------------------------------------
+seckill.reset.enabled=true
