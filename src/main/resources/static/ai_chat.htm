@@ -1,0 +1,173 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+    <title>秒杀助手</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+    <style>
+        body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #f5f6f8; margin: 0; padding: 24px; }
+        .wrap { max-width: 720px; margin: 0 auto; }
+        h2 { margin: 0 0 4px; font-size: 20px; color: #222; }
+        .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
+        #log { background: #fff; border-radius: 8px; padding: 16px; min-height: 320px; max-height: 60vh;
+               overflow-y: auto; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+        .row { margin-bottom: 12px; line-height: 1.6; font-size: 14px; }
+        .me .bubble { background: #e8f0fe; color: #1a4b8c; }
+        .ai .bubble { background: #f2f3f5; color: #222; }
+        .bubble { display: inline-block; padding: 8px 12px; border-radius: 8px; max-width: 88%; white-space: pre-wrap; word-break: break-word; }
+        .tooltip { font-size: 12px; color: #b8860b; margin: 2px 0 6px; }
+        .err { color: #c0392b; font-size: 13px; }
+        .bar { display: flex; gap: 8px; margin-top: 14px; }
+        #msg { flex: 1; padding: 10px 12px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 14px; outline: none; }
+        #msg:focus { border-color: #4a90e2; }
+        button { padding: 10px 20px; border: 0; border-radius: 6px; background: #4a90e2; color: #fff; font-size: 14px; cursor: pointer; }
+        button:disabled { background: #a9c7ec; cursor: not-allowed; }
+        .hint { font-size: 12px; color: #999; margin-top: 10px; }
+
+        /* 被 ai-widget.js 以 iframe 嵌进悬浮面板时（?embed=1）：
+           隐藏页头与说明文字，用 flex 让对话区占满整个面板高度 */
+        body.embed { padding: 0; background: #fff; }
+        body.embed .wrap { max-width: none; height: 100vh; display: flex; flex-direction: column; }
+        body.embed h2, body.embed .sub, body.embed .hint { display: none; }
+        body.embed #log { flex: 1 1 auto; min-height: 0; max-height: none; border-radius: 0; box-shadow: none; }
+        body.embed .bar { flex: 0 0 auto; margin-top: 0; padding: 8px 10px; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h2>秒杀助手</h2>
+    <div class="sub">可以问：<b>iPhone X 还剩多少件？</b>／<b>秒杀什么时候结束？</b>／<b>我抢到了吗？</b></div>
+
+    <div id="log"></div>
+
+    <div class="bar">
+        <input id="msg" placeholder="输入问题，回车发送" autocomplete="off"/>
+        <button id="send">发送</button>
+    </div>
+    <div class="hint">回答由大模型生成；涉及库存、时间、订单的数字来自数据库实时查询（上方会显示正在调用的业务接口）。</div>
+</div>
+
+<script>
+    // 以悬浮面板 iframe 方式打开时（?embed=1），切换到紧凑布局
+    if (/[?&]embed=1/.test(location.search)) {
+        document.body.className = 'embed';
+    }
+
+    // 会话 ID：同一次页面停留期间复用，Redis 里就能把多轮问答串起来。
+    // 刷新页面会换一个新会话（换会话即清空上下文）。
+    var sessionId = 'sess-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    var sending = false;
+    var es = null;
+
+    var logEl = document.getElementById('log');
+    var msgEl = document.getElementById('msg');
+    var sendEl = document.getElementById('send');
+
+    function addRow(cls, text) {
+        var row = document.createElement('div');
+        row.className = 'row ' + cls;
+        var bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = text || '';
+        row.appendChild(bubble);
+        logEl.appendChild(row);
+        logEl.scrollTop = logEl.scrollHeight;
+        return bubble;
+    }
+
+    function showTool(bubble, toolName) {
+        var tip = document.createElement('div');
+        tip.className = 'tooltip';
+        tip.textContent = '⏳ 正在调用业务接口：' + toolName + '()';
+        bubble.parentNode.insertBefore(tip, bubble);
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setBusy(busy) {
+        sending = busy;
+        sendEl.disabled = busy;
+        sendEl.textContent = busy ? '回答中…' : '发送';
+    }
+
+    // 一个事件都没收到时的兜底提示。
+    // 场景：/ai/chat 上的 @AccessLimit(needLogin=true) 在拦截器里直接把请求挡掉，
+    // 返回的是 application/json 而不是 text/event-stream；EventSource 遇到非 SSE 响应
+    // 会静默失败（只触发 onerror，读不到任何原因）。如果不在这里说明，用户看到的就是
+    // 一个空白气泡，完全不知道发生了什么。
+    function showNoAnswerHint(bubble) {
+        var tip = document.createElement('div');
+        tip.className = 'err';
+        tip.innerHTML = '⚠ 没有收到任何回答。最常见的原因是<b>尚未登录</b> —— '
+            + '请先到 <a href="/login/to_login" target="_blank">登录页</a> 用测试账号（13000000000 / 123456）登录，'
+            + '然后回到本页重试。若已登录，请检查服务端是否配置了 ai.enabled 与 ai.deepseek.api-key。';
+        bubble.parentNode.appendChild(tip);
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function send() {
+        if (sending) return;
+        var question = msgEl.value.trim();
+        if (!question) return;
+
+        addRow('me', question);
+        msgEl.value = '';
+        setBusy(true);
+        var bubble = addRow('ai', '');
+        var gotAnyEvent = false;
+
+        var url = '/ai/chat?sessionId=' + encodeURIComponent(sessionId)
+                + '&message=' + encodeURIComponent(question);
+        es = new EventSource(url);
+
+        // 工具调用事件：让"AI 真的查了数据库"这件事对用户可见
+        es.addEventListener('tool', function (e) {
+            gotAnyEvent = true;
+            showTool(bubble, e.data);
+        });
+
+        // 增量文本：边收边渲染
+        es.addEventListener('delta', function (e) {
+            gotAnyEvent = true;
+            bubble.textContent += e.data;
+            logEl.scrollTop = logEl.scrollHeight;
+        });
+
+        es.addEventListener('err', function (e) {
+            gotAnyEvent = true;
+            var err = document.createElement('div');
+            err.className = 'err';
+            err.textContent = '⚠ ' + e.data;
+            bubble.parentNode.appendChild(err);
+        });
+
+        // 服务端明确告知本轮结束 —— 必须主动 close，
+        // 否则 EventSource 会按规范自动重连，把同一个问题再问一遍
+        es.addEventListener('done', function () {
+            gotAnyEvent = true;
+            es.close();
+            es = null;
+            setBusy(false);
+            msgEl.focus();
+        });
+
+        es.onerror = function () {
+            if (es) { es.close(); es = null; }
+            setBusy(false);
+            if (!gotAnyEvent) { showNoAnswerHint(bubble); }
+        };
+    }
+
+    sendEl.onclick = send;
+    msgEl.addEventListener('keydown', function (e) {
+        // 回车发送。三种判定都要看：标准是 e.key === 'Enter'，
+        // 但某些环境（旧内核、自动化工具注入的合成事件）里 e.key 可能为空，
+        // 只有 keyCode/which 有值 —— 只认一种会导致"按回车没反应"。
+        var isEnter = (e.key === 'Enter') || (e.keyCode === 13) || (e.which === 13);
+        if (isEnter) {
+            e.preventDefault();
+            send();
+        }
+    });
+    msgEl.focus();
+</script>
+</body>
+</html>

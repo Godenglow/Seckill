@@ -1,14 +1,15 @@
 # 秒杀系统 代码审查与本地化改造报告
 
-> 审查对象：`D:\Projects\java-projects\seckill\seckill`（Git 仓库根目录，`master` 分支）
+> 审查对象：`D:\Projects\java-projects\seckill\seckill`（Git 仓库根目录，`main` 分支）
 > 审查日期：2026-09-14
-> 报告范围：项目架构分析、缺陷清单、本次本地化改造记录、本地运行手册、验证记录
+> 报告范围：项目架构分析、缺陷清单、本地化改造记录、本地运行手册、验证记录
+> 本项目基于开源秒杀实现范例二次开发，代码遵循仓库中的 Apache-2.0 许可。
 
 ---
 
 ## 0. 结论摘要
 
-这是一个**教学性质的高并发秒杀系统**，源自慕课网课程《Java 秒杀系统方案优化 高性能高并发实战》的实践项目（fork 自 `github.com/b2stry/seckill`，包名由课程原始的 `miaosha` 改为 `seckill`）。
+高并发秒杀系统的后端实现，围绕"瞬时流量远大于库存、而数据库连接是稀缺资源"这一矛盾设计：Redis 预减库存把绝大多数无效流量挡在数据库之前，RabbitMQ 异步削峰，数据库唯一索引兜底防重。
 
 **架构设计是合格的教科书答案**：Redis 预减库存、内存标记短路、RabbitMQ 异步下单、隐藏秒杀地址、算术验证码、接口限流、页面缓存与静态化——秒杀场景的七个经典问题都覆盖到了。
 
@@ -27,11 +28,11 @@
 
 | 项 | 值 |
 |---|---|
-| Maven 坐标 | `com.shallowan:seckill:1.0.0` |
+| Maven 坐标 | `com.godenglow:seckill:1.0.0` |
 | 打包方式 | `jar`（`spring-boot-maven-plugin`，可执行 fat jar） |
 | 父 POM | `spring-boot-starter-parent:1.5.10.RELEASE`（2018 年发布，已 EOL） |
 | Java 版本 | 1.8 |
-| 源码规模 | 62 个 Java 文件（原 61 + 本次新增 1 个配置类） |
+| 源码规模 | 59 个 Java 文件 |
 | 测试 | **无**。有 `spring-boot-starter-test` 依赖，但没有 `src/test` 目录 |
 | 构建/部署自动化 | **无**。没有 Dockerfile、CI 配置、构建脚本，也没有 Maven Wrapper |
 
@@ -52,27 +53,26 @@
 ### 源码结构
 
 ```
-com.shallowan.seckill
+com.godenglow.seckill
 ├── SeckillApplication            启动类
-├── controller/  SeckillController, GoodsController, OrderController,
-│                LoginController, UserController, SimpleController
-├── service/     SeckillService, GoodsService, OrderService,
-│                SeckillUserService, UserService
-├── dao/         GoodsDao, OrderDao, SeckillUserDao, UserDao   （全部注解式）
-├── domain/      Goods, SeckillGoods, OrderInfo, SeckillOrder, SeckillUser, User
+├── controller/  SeckillController, GoodsController, OrderController, LoginController
+├── service/     SeckillService, GoodsService, OrderService, SeckillUserService
+├── dao/         GoodsDao, OrderDao, SeckillUserDao   （全部注解式）
+├── domain/      Goods, SeckillGoods, OrderInfo, SeckillOrder, SeckillUser
 ├── vo/          GoodsVO, GoodsDetailVO, OrderDetailVO, LoginVO
 ├── redis/       RedisService, RedisPoolFactory, RedisConfig, BasePrefix + 各 *Key
 ├── rabbitmq/    MQConfig, MQSender, MQReceiver, SeckillMessage
+├── ai/          DeepSeekClient, AiToolKit, AiChatService   （Function Calling 助手，见 §4-6）
 ├── access/      AccessInterceptor, AccessLimit, UserContext   （限流 + 用户上下文）
 ├── config/      WebConfig, LoginInterceptor, UserArgumentResolver,
-│                SwaggerConfig, DataSourceConfig（本次新增）
+│                SwaggerConfig, DataSourceConfig
 ├── result/      Result, CodeMsg                                （统一返回信封）
 ├── exception/   GlobalException, GlobalExceptionHandler
 ├── validator/   IsMobile(+Validator), NeedLogin
-└── util/        MD5Util, UUIDUtil, CookieUtil, ValidatorUtil, UserUtil, DBUtil
+└── util/        MD5Util, UUIDUtil, CookieUtil, ValidatorUtil
 ```
 
-设计上值得一提的是：`Result`/`CodeMsg` 构成的统一返回信封、`BasePrefix` + `KeyPrefix` 的缓存键抽象、以及用拦截器 + `UserContext`（ThreadLocal）把认证与限流从业务代码里剥离出来，这几处比同期的课程项目干净。
+设计上值得一提的是：`Result`/`CodeMsg` 构成的统一返回信封、`BasePrefix` + `KeyPrefix` 的缓存键抽象、以及用拦截器 + `UserContext`（ThreadLocal）把认证与限流从业务代码里剥离出来，这几处比同类实现干净。
 
 ---
 
@@ -171,32 +171,67 @@ com.shallowan.seckill
 | `pom.xml` | 驱动为 Boot 1.5.10 默认的 `mysql-connector-java:5.1.45`，**无法完成 MySQL 8 的 `caching_sha2_password` 认证** | 覆盖 `<mysql.version>8.0.33</mysql.version>`，驱动类改 `com.mysql.cj.jdbc.Driver`，JDBC URL 加 `allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai` |
 | `config/DataSourceConfig.java`（新增） | `spring.datasource.maxActive` 等 Druid 专有参数在 Spring Boot 1.5 下**根本不会绑定**，全部静默失效 | 新增配置类，把 `DruidDataSource` 直接交给 `@ConfigurationProperties(prefix="spring.datasource")` 绑定，参数才真正生效；同时把 `maxActive=1000 / initialSize=100 / minIdle=500` 改为本地合理的 `20/5/5`（MySQL 默认 `max_connections=151`，启动即申请 100 条连接会直接顶到上限） |
 | `application-local.properties` + `.example`（新增） | 凭据需要外置 | 新增本地配置文件与模板，`application-local.properties` 加入 `.gitignore` |
-| `util/DBUtil.java` | 该工具直接从 `application.properties` 读连接信息，配置外置后会读到 null | 改为依次加载 `application.properties` 与 `application-local.properties` |
+| `util/DBUtil.java` | 该工具直接从 `application.properties` 读连接信息，配置外置后会读到 null | 改为依次加载 `application.properties` 与 `application-local.properties`（该文件随后在 §4-5 的脚手架清理中被整体删除） |
 
-### 4-4 改动文件清单
+### 4-4 改造文件清单（本地化与缺陷修复）
 
 ```
 修改  .gitignore
-修改  README.md
+修改  README.md                    （后于 §4-5 重写）
 修改  pom.xml
-修改  src/main/java/com/shallowan/seckill/controller/LoginController.java
-修改  src/main/java/com/shallowan/seckill/controller/SeckillController.java
-修改  src/main/java/com/shallowan/seckill/dao/GoodsDao.java
-修改  src/main/java/com/shallowan/seckill/service/OrderService.java
-修改  src/main/java/com/shallowan/seckill/service/SeckillService.java
-修改  src/main/java/com/shallowan/seckill/util/DBUtil.java
+修改  src/main/java/com/godenglow/seckill/controller/LoginController.java
+修改  src/main/java/com/godenglow/seckill/controller/SeckillController.java
+修改  src/main/java/com/godenglow/seckill/dao/GoodsDao.java
+修改  src/main/java/com/godenglow/seckill/service/OrderService.java
+修改  src/main/java/com/godenglow/seckill/service/SeckillService.java
 修改  src/main/resources/application.properties
 修改  src/main/resources/seckill.sql
-新增  src/main/java/com/shallowan/seckill/config/DataSourceConfig.java
+新增  src/main/java/com/godenglow/seckill/config/DataSourceConfig.java
 新增  src/main/resources/application-local.properties.example
 新增  src/main/resources/application-local.properties   （已被 .gitignore 忽略，不会进入版本库）
 ```
+
+### 4-5 工程整理
+
+本地化改造之后又做了一轮面向交付的整理，目标是把项目变成一份自洽、可直接阅读的代码库。
+
+| 动作 | 内容 |
+|---|---|
+| 统一包名与坐标 | Java 包名统一为 `com.godenglow.seckill`，同步更新全部包声明与 import、`SwaggerConfig` 的 `basePackage`、`application.properties` 的 `type-aliases-package`、`pom.xml` 的 `groupId` |
+| 清理源码头部 | 移除源文件中遗留的 `@author` 标注（含只含该标注的整块 javadoc） |
+| 删除脚手架代码 | `SimpleController`（6 个 `/demo/*` 接口）、`UserController`、`UserService`、`UserDao`、`User`、`UserKey`、`UserUtil`、`DBUtil`。其中 `/demo/db` 查询的是一张 `seckill.sql` 里根本不存在的 `user` 表，`UserUtil` 里硬编码了 `D:/tokens.txt` |
+| 删除无用资源 | `templates/hello.html`、`templates/seckill_fail.html`、`templates/order_detail.html`（后两个只被注释掉的代码引用） |
+| 精简 MQ 配置 | `MQConfig` 里 direct/topic/fanout/headers 四套演示拓扑没有任何生产者或消费者，只保留业务真正使用的 `seckill.queue`；同时清掉 broker 上残留的 4 个空队列与 3 个演示交换机 |
+| 清理注释掉的旧实现 | `SeckillController` 中整段注释的 `/do_seckill` 流程、`MQSender`/`MQReceiver` 中注释的示例方法、`GoodsController` 中 `// return "..."` 视图返回 |
+| 清理无用 import 与字段 | `SeckillController`（`OrderInfo`、`MD5Util`、`UUIDUtil`、`NeedLogin`、`HttpResponse`、`Model`）、`LoginController`（未使用的 `RedisService` 字段）、`SeckillApplication`（导入了却未继承的 `SpringBootServletInitializer`）、pom 里注释掉的 war 插件与 tomcat 依赖 |
+| 修复失效页面 | `templates/goods_detail.html` 的表单原本提交到已删除的 `/seckill/do_seckill`，改为跳转静态页 `/goods_detail.htm`；`static/order_detail.htm` 里硬编码的假收货人与地址（项目没有地址模块，`deliveryAddrId` 恒为 0）已删除 |
+| 重写文档 | README 由笔记体例改写为工程文档：设计说明、技术栈、下单链路、关键取舍、本地运行手册、接口表、并发验证结果 |
+
+整理后源文件数 62 → 54，`mvn clean package` 通过，27 项端到端与并发验证全部复跑通过。
+
+### 4-6 AI 助手模块（新增功能）
+
+在整理完成后新增了一个基于 Function Calling 的客服助手，源文件数 54 → 59。
+
+| 新增 | 说明 |
+|---|---|
+| `ai/DeepSeekClient.java` | 手写 DeepSeek（OpenAI 兼容）客户端：非流式 `chat` 用于工具解析轮，流式 `chatStream` 用于生成回答。**不用 Spring AI** —— 它要求 Boot 3.4+/Java 17，本项目是 Boot 1.5.10/Java 8。逐行解析 SSE，JSON 复用已有 fastjson，**未引入任何新依赖** |
+| `ai/AiToolKit.java` | 三个只读工具（库存 / 活动时间窗 / 我的订单），全部直读现有 DAO；身份类工具由服务端注入当前用户，不接受模型传参 |
+| `ai/AiChatService.java` | 两阶段调用（非流式解析工具 → 流式生成回答）、Redis 会话记忆、独立线程池推送 SSE |
+| `controller/AiChatController.java` | `GET /ai/chat`，复用既有 `@AccessLimit` 做限流（每用户 10 次/分钟，因为每次对话都真实消耗 token） |
+| `redis/AiChatKey.java` | 会话键 `AiChatKey:session<userId>:<sessionId>`，TTL 30 分钟 |
+| `static/ai_chat.htm` | 演示页面，`EventSource` 接收 `tool`/`delta`/`err`/`done` 四类事件 |
+| `dao/OrderDao.listRecentOrders` | 供"我的订单"工具使用 |
+
+**实测结果**（10 项断言全部通过）：问库存触发 `getGoodsStock` 并答出与数据库一致的 10 件；问时间触发 `getSeckillActivity` 并答出表里的结束时间；问订单触发 `getMyOrders` 并正确回答无订单；追问"那它的秒杀价是多少"（不再提商品名）能答出商品与价格，证明 Redis 会话上下文生效；会话在 Redis 中确有 7 条消息且 TTL=1800 秒；首字延迟 1993ms / 整体 2139ms，确认 SSE 增量下发而非一次性返回。
+
+**已知取舍**：首字延迟几乎全部来自第一轮非流式的工具解析；回答长度受系统提示限制在两三句，因此流式在这个长度下收益有限。要压首字延迟需把工具轮也改成流式解析 `tool_calls` 分片，目前未做。
 
 ---
 
 ## 5. 尚未处理的问题清单
 
-以下问题本次**未修改**（改动面较大或涉及架构取舍），按优先级列出，供后续决策。
+以下问题中，除标注**已修复**的以外，本次均**未修改**（改动面较大或涉及架构取舍），按优先级列出，供后续决策。
 
 ### P1（高危）
 
@@ -238,9 +273,9 @@ sp.match("*" + key + "*");
 `vo/GoodsDetailVO.java` 暴露的字段名是 `seckillUser`，而 `static/goods_detail.htm:178` 读的是 `detail.user`。`user` 恒为 `undefined`，`$("#userTip").hide()` 永远不会执行。
 **建议**：统一字段名。
 
-**P2-5　`templates/goods_detail.html` 指向已被删除的接口**
-该模板的购买按钮提交到 `/seckill/do_seckill`，而该映射在 `SeckillController` 中已被注释掉（历史遗留）。也就是说**这个 Thymeleaf 页面是不可用的**，真正能走通的是静态页 `static/goods_detail.htm`。
-**建议**：删除该模板，或把它改成调用当前的 `/{path}/seckill` 流程。
+**P2-5　`templates/goods_detail.html` 指向已被删除的接口（已修复）**
+该模板的购买按钮原本提交到 `/seckill/do_seckill`，而该映射早已被删除（历史遗留），页面实际不可用——真正能走通的是静态页 `static/goods_detail.htm`。
+**处置**：已改为跳转静态页 `/goods_detail.htm`（见 §4-5）。
 
 ### P3（可维护性）
 
@@ -249,12 +284,12 @@ sp.match("*" + key + "*");
 - **技术栈整体 EOL**：Spring Boot 1.5.10（2018）、Druid 1.0.5、springfox 2.6.1。
 - **`.idea/` 被提交进仓库**，且 `misc.xml` 里 `project-jdk-name="21"`、`languageLevel="JDK_21"` 与本项目的 `java.version=1.8` 直接冲突（实测 JDK 21 无法可靠编译这套 2018 年的依赖树）。
 - **`mybatis.mapperLocations=classpath:.../dao/*.xml` 指向不存在的路径**——所有 Mapper 都是注解式的，没有任何 XML。该配置是死的（本次已注释并说明）。
-- **日志体系缺失**。没有 logback/log4j 配置；61 个类里只有 4 个有 `@Slf4j`；异常处理用 `e.printStackTrace()`（`GlobalExceptionHandler`、`RedisService.delete`、`SeckillService.calc`）。
-- **死代码**：`UserDao` / `UserService` / `UserController` 与 `SimpleController` 的 `/demo/db`（查询一个 `seckill.sql` 里根本不存在的 `user` 表）；`LoginInterceptor` + `@NeedLogin`；`MQConfig` 里 topic/fanout/headers 的示例队列没有任何生产者或消费者；`SeckillController` 中未使用的 import（`org.apache.http.HttpResponse`、`MD5Util`、`UUIDUtil`、`NeedLogin`）；`SeckillApplication` 导入了 `SpringBootServletInitializer` 却没有继承，pom 里还留着注释掉的 war 插件——一次没做完的 WAR 改造残留。
-- **`util/UserUtil` 位于 `src/main`**，含 `main()` 方法、批量创建 5000 用户的逻辑，以及硬编码的 Windows 路径 `D:/tokens.txt`。它会一并打进生产 jar。这是压测脚手架（生成 JMeter 用的 token 文件），但 JMeter 脚本本身不在仓库里。
+- **日志体系缺失**。没有 logback/log4j 配置；54 个类里只有 4 个有 `@Slf4j`；异常处理用 `e.printStackTrace()`（`GlobalExceptionHandler`、`RedisService.delete`、`SeckillService.calc`）。
+- **`LoginInterceptor` + `@NeedLogin` 是死代码**（呼应 P1-1：拦截器从未注册，注解无人消费）。
 - **`/seckill/reset` 把库存硬编码为 10**（`SeckillController`），忽略数据库里的真实值，且不重置 `localOverMap` 之外的任何内存状态——测试辅助代码直接长在了业务 Controller 上。
-- **Redis 库存计数会被扣成负数**（实测 30 请求 / 10 库存后停在 `-18`）。这是"先减后判"设计的必然结果，但代码里没有任何注释说明该值不可用于展示。
+- **Redis 库存计数会被扣成负数**（实测 30 请求 / 10 库存后停在 `-18 ~ -20`）。这是"先减后判"设计的必然结果，但代码里没有任何注释说明该值不可用于展示。
 - **`Result.error(codeMsg)` 在 `codeMsg == null` 时会返回一个"成功"响应**。`result/Result.java:21-27` 的构造器在 `codeMsg == null` 时直接 `return`，此 `code` 保持为默认值 `0`——而 `0` 在这套协议里恰恰代表**成功**（`data` 为 null、`msg` 为 null）。现有调用点都没有传 null，所以尚未触发，但这是一个高危埋雷：任何一次"本该报错却传了 null"的调用，都会静默变成业务成功。
+- **仓库体积与 `.git` 历史**：本地曾存在一条包含早期开发过程的长历史，已清理为单一 `main` 分支（详见 §4-5 之后的工程整理记录）。
 
 ---
 
@@ -425,11 +460,11 @@ Java 版本确认为 `openjdk version "1.8.0_452"`（Corretto）。
 
 ## 8. 建议的后续工作（按优先级）
 
-1. **轮换已泄露的凭据**，并评估 `<REDACTED-SERVER-IP>` 是否仍需保留（优先级最高，且与代码无关）。
+1. **轮换已泄露的凭据**，并评估线上演示服务器是否仍需保留（优先级最高，与代码无关）。
 2. 恢复 `LoginInterceptor` 注册，让认证与限流职责分离（P1-1）。
 3. 为存量数据库补 `uk_user_goods` 唯一索引——**先清理重复数据**（P1-2）。
 4. 修正页面缓存的用户维度问题（P1-3）。
 5. 升级 fastjson 至 1.2.83+，并把 `GoodsDetailVO` / 前端字段名对齐（P2-3、P2-4）。
 6. 把前端轮询间隔从 50ms 放宽，或在回调中处理非 0 返回码（P2-2）。
 7. 补并发测试用例，把"不超卖、不重复下单"固化成回归测试——目前这两个性质只靠人工验证保障。
-8. 清理死代码与提交进仓库的 `.idea/`，并把 IDE 的 JDK 从 21 改回 1.8。
+8. 把提交进仓库的 `.idea/` 移出版本控制，并把 IDE 的 JDK 从 21 改回 1.8。

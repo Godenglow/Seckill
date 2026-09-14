@@ -4,6 +4,11 @@ target/
 ### 本地私有配置（含数据库 / Redis / RabbitMQ 凭据，绝不提交）###
 src/main/resources/application-local.properties
 
+### 运行日志（启动时 stdout 重定向到 logs/，不提交）###
+### 注意：日志千万不要写进 target/ —— 运行中的 JVM 会占住它，
+### 导致 mvn clean 无法删除 target 目录而构建失败。
+logs/
+
 ### STS ###
 .apt_generated
 .classpath
