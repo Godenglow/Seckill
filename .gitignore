@@ -1,32 +1,37 @@
+# 构建产物与日志
 target/
-!.mvn/wrapper/maven-wrapper.jar
-
-### 本地私有配置（含数据库 / Redis / RabbitMQ 凭据，绝不提交）###
-src/main/resources/application-local.properties
-
-### 运行日志（启动时 stdout 重定向到 logs/，不提交）###
-### 注意：日志千万不要写进 target/ —— 运行中的 JVM 会占住它，
-### 导致 mvn clean 无法删除 target 目录而构建失败。
-logs/
-
-### STS ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-
-### IntelliJ IDEA ###
-.idea
-*.iws
-*.iml
-*.ipr
-
-### NetBeans ###
-nbproject/private/
 build/
-nbbuild/
 dist/
-nbdist/
-.nb-gradle/
+logs/
+*.log
+
+# 本机配置
+src/main/resources/application-local.properties
+.env
+.env.local
+
+# IDE 与本机工具
+.idea/
+.vscode/
+.zcode/
+.workbuddy/
+.codebuddy/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+
+# 本地测试、验收与开发记录
+src/test/
+scripts/
+verify*.ps1
+*.jmx
+CODE_REVIEW.md
+output/
+tmp/
+
+# 系统文件
+.DS_Store
+Thumbs.db
